@@ -15,7 +15,7 @@ from dataLoader import dataset_dict
 import sys
 
 
-device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
 renderer = OctreeRender_trilinear_fast
 
