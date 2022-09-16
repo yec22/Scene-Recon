@@ -1,0 +1,15 @@
+.DS_Store
+.ipynb_checkpoints
+*.pyc
+cache*
+*.pkl
+*.ply
+*.mp4
+*.mp3
+*.wav
+*.zip
+*.jpg
+*.png
+.vscode
+*.json
+log
