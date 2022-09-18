@@ -6,6 +6,38 @@ import numpy as np
 import time
 
 
+def sample_pdf(bins, weights, n_samples, det=False):
+    # This implementation is from NeRF
+    # Get pdf
+    weights = weights + 1e-5  # prevent nans
+    pdf = weights / torch.sum(weights, -1, keepdim=True)
+    cdf = torch.cumsum(pdf, -1)
+    cdf = torch.cat([torch.zeros_like(cdf[..., :1]).to(weights.device), cdf], -1)
+    # Take uniform samples
+    if det:
+        u = torch.linspace(0. + 0.5 / n_samples, 1. - 0.5 / n_samples, steps=n_samples)
+        u = u.expand(list(cdf.shape[:-1]) + [n_samples])
+    else:
+        u = torch.rand(list(cdf.shape[:-1]) + [n_samples])
+
+    # Invert CDF
+    u = u.contiguous().to(cdf.device)
+    inds = torch.searchsorted(cdf, u, right=True)
+    below = torch.max(torch.zeros_like(inds - 1).to(weights.device), inds - 1)
+    above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
+    inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
+
+    matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+    denom = (cdf_g[..., 1] - cdf_g[..., 0])
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom).to(weights.device), denom)
+    t = (u - cdf_g[..., 0]) / denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+
+    return samples
+
 def positional_encoding(positions, freqs):
     freq_bands = (2**torch.arange(freqs).float()).to(positions.device)  # (F,)
     pts = (positions[..., None] * freq_bands).reshape(
@@ -337,27 +369,103 @@ class TensorBase(torch.nn.Module):
         mask_outbbox = ((self.aabb[0] > rays_pts) | (rays_pts > self.aabb[1])).any(dim=-1)
         return rays_pts, interpx, ~mask_outbbox
 
-    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
-        N_samples = N_samples if N_samples>0 else self.nSamples
-        stepsize = self.stepSize
-        near, far = self.near_far
-        vec = torch.where(rays_d==0, torch.full_like(rays_d, 1e-6), rays_d)
-        rate_a = (self.aabb[1] - rays_o) / vec
-        rate_b = (self.aabb[0] - rays_o) / vec
-        t_min = torch.minimum(rate_a, rate_b).amax(-1).clamp(min=near, max=far)
+    def up_sample(self, rays_o, rays_d, z_vals, sdf, n_importance, inv_s):
+        """
+        Up sampling give a fixed inv_s
+        """
+        batch_size, n_samples = z_vals.shape
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * z_vals[..., :, None]  # n_rays, n_samples, 3
+        sdf = sdf.reshape(batch_size, n_samples)
+        prev_sdf, next_sdf = sdf[:, :-1], sdf[:, 1:]
+        prev_z_vals, next_z_vals = z_vals[:, :-1], z_vals[:, 1:]
+        mid_sdf = (prev_sdf + next_sdf) * 0.5
+        cos_val = (next_sdf - prev_sdf) / (next_z_vals - prev_z_vals + 1e-5)
 
-        rng = torch.arange(N_samples)[None].float()
-        if is_train:
-            rng = rng.repeat(rays_d.shape[-2],1)
-        step = stepsize * rng.to(rays_o.device)
-        if is_train:
-            step += stepsize * torch.rand_like(step).to(rays_o.device)
-        interpx = (t_min[...,None] + step)
+        # ----------------------------------------------------------------------------------------------------------
+        # Use min value of [ cos, prev_cos ]
+        # Though it makes the sampling (not rendering) a little bit biased, this strategy can make the sampling more
+        # robust when meeting situations like below:
+        #
+        # SDF
+        # ^
+        # |\          -----x----...
+        # | \        /
+        # |  x      x
+        # |---\----/-------------> 0 level
+        # |    \  /
+        # |     \/
+        # |
+        # ----------------------------------------------------------------------------------------------------------
+        prev_cos_val = torch.cat([torch.zeros([batch_size, 1]).to(rays_o.device), cos_val[:, :-1]], dim=-1)
+        cos_val = torch.stack([prev_cos_val, cos_val], dim=-1)
+        cos_val, _ = torch.min(cos_val, dim=-1, keepdim=False)
+
+        dist = (next_z_vals - prev_z_vals)
+        prev_esti_sdf = mid_sdf - cos_val * dist * 0.5
+        next_esti_sdf = mid_sdf + cos_val * dist * 0.5
+        prev_cdf = torch.sigmoid(prev_esti_sdf * inv_s)
+        next_cdf = torch.sigmoid(next_esti_sdf * inv_s)
+        alpha = (prev_cdf - next_cdf + 1e-5) / (prev_cdf + 1e-5)
+        weights = alpha * torch.cumprod(
+            torch.cat([torch.ones([batch_size, 1]).to(rays_o.device), 1. - alpha + 1e-7], -1), -1)[:, :-1]
+
+        z_samples = sample_pdf(z_vals, weights, n_importance, det=True).detach()
+        return z_samples
+
+    def cat_z_vals(self, rays_o, rays_d, z_vals, new_z_vals, sdf, last=False):
+        batch_size, n_samples = z_vals.shape
+        _, n_importance = new_z_vals.shape
+        pts = rays_o[:, None, :] + rays_d[:, None, :] * new_z_vals[..., :, None]
+        z_vals = torch.cat([z_vals, new_z_vals], dim=-1)
+        z_vals, index = torch.sort(z_vals, dim=-1)
+
+        if not last:
+            xyz_sampled = self.normalize_coord(pts.reshape(-1, 3))
+            sigma_feature = self.compute_densityfeature(xyz_sampled)
+            new_sdf = self.densityModule.sdf(xyz_sampled, sigma_feature).squeeze()
+            new_sdf = new_sdf.reshape(batch_size, n_importance)
+            sdf = torch.cat([sdf, new_sdf], dim=-1)
+            xx = torch.arange(batch_size)[:, None].expand(batch_size, n_samples + n_importance).reshape(-1)
+            index = index.reshape(-1)
+            sdf = sdf[(xx, index)].reshape(batch_size, n_samples + n_importance)
+
+        return z_vals, sdf
+
+    def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
+        batch_size = len(rays_o)
+        N_samples_coarse = 64
+        up_sample_steps = 4
+
+        near, far = self.near_far
+        interpx = torch.linspace(0.0, 1.0, N_samples_coarse)
+        interpx = interpx.expand(batch_size, N_samples_coarse)
+        interpx = near + (far - near) * interpx[:, :]
+        interpx = interpx.to(rays_o.device)
+
+        with torch.no_grad():
+            pts = rays_o[:, None, :] + rays_d[:, None, :] * interpx[..., :, None]
+            xyz_sampled = self.normalize_coord(pts.reshape(-1, 3))
+            sigma_feature = self.compute_densityfeature(xyz_sampled)
+            sdf = self.densityModule.sdf(xyz_sampled, sigma_feature).squeeze()
+            sdf = sdf.reshape(batch_size, N_samples_coarse)
+
+            for i in range(up_sample_steps):
+                new_z_vals = self.up_sample(rays_o,
+                                            rays_d,
+                                            interpx,
+                                            sdf,
+                                            16,
+                                            64 * 2**i)
+                interpx, sdf = self.cat_z_vals(rays_o,
+                                               rays_d,
+                                               interpx,
+                                               new_z_vals,
+                                               sdf,
+                                               last=(i + 1 == up_sample_steps))
 
         rays_pts = rays_o[...,None,:] + rays_d[...,None,:] * interpx[...,None]
-        mask_outbbox = ((self.aabb[0]>rays_pts) | (rays_pts>self.aabb[1])).any(dim=-1)
 
-        return rays_pts, interpx, ~mask_outbbox
+        return rays_pts, interpx
 
 
     def shrink(self, new_aabb, voxel_size):
@@ -427,7 +535,7 @@ class TensorBase(torch.nn.Module):
                 mask_inbbox = t_max > t_min
 
             else:
-                xyz_sampled, _,_ = self.sample_ray(rays_o, rays_d, N_samples=N_samples, is_train=False)
+                xyz_sampled, _ = self.sample_ray(rays_o, rays_d, N_samples=N_samples, is_train=False)
                 mask_inbbox= (self.alphaMask.sample_alpha(xyz_sampled).view(xyz_sampled.shape[:-1]) > 0).any(-1)
 
             mask_filtered.append(mask_inbbox.cpu())
@@ -497,30 +605,22 @@ class TensorBase(torch.nn.Module):
             dists = dists * rays_norm
             viewdirs = viewdirs / rays_norm
         else:
-            xyz_sampled, z_vals, ray_valid = self.sample_ray(rays_chunk[:, :3], viewdirs, is_train=is_train,N_samples=N_samples)
+            xyz_sampled, z_vals = self.sample_ray(rays_chunk[:, :3], viewdirs, is_train=is_train,N_samples=N_samples)
             dists = torch.cat((z_vals[:, 1:] - z_vals[:, :-1], torch.zeros_like(z_vals[:, :1])), dim=-1)
         viewdirs = viewdirs.view(-1, 1, 3).expand(xyz_sampled.shape)
-        
-        if self.alphaMask is not None:
-            alphas = self.alphaMask.sample_alpha(xyz_sampled[ray_valid])
-            alpha_mask = alphas > 0
-            ray_invalid = ~ray_valid
-            ray_invalid[ray_valid] |= (~alpha_mask)
-            ray_valid = ~ray_invalid
 
 
         sigma = torch.zeros(xyz_sampled.shape[:-1], device=xyz_sampled.device)
         rgb = torch.zeros((*xyz_sampled.shape[:2], 3), device=xyz_sampled.device)
 
-        if ray_valid.any():
-            xyz_sampled = self.normalize_coord(xyz_sampled)
-            sigma_feature = self.compute_densityfeature(xyz_sampled[ray_valid])
+        
+        xyz_sampled_flat = self.normalize_coord(xyz_sampled.reshape(-1, 3))
+        sigma_feature = self.compute_densityfeature(xyz_sampled_flat)
 
-            sdf_val = self.densityModule.sdf(xyz_sampled[ray_valid], sigma_feature).squeeze()
-            if not self.is_eval:
-                gradients = self.densityModule.gradient(xyz_sampled[ray_valid], sigma_feature).squeeze()
-            sigma[ray_valid] = sdf_val
-
+        sdf_val = self.densityModule.sdf(xyz_sampled_flat, sigma_feature).squeeze()
+        if not self.is_eval:
+            gradients = self.densityModule.gradient(xyz_sampled_flat, sigma_feature).squeeze()
+        sigma = sdf_val.reshape(sigma.shape)
 
         alpha, weight, bg_weight = self.sdf2alpha(sigma)
 

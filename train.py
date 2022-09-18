@@ -3,8 +3,6 @@ import os
 from tqdm.auto import tqdm
 from opt import config_parser
 
-
-
 import json, random
 from renderer import *
 from utils import *
@@ -15,8 +13,7 @@ from dataLoader import dataset_dict
 import sys
 
 
-device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
-
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 renderer = OctreeRender_trilinear_fast
 
 
@@ -171,7 +168,7 @@ def reconstruction(args):
     tvreg = TVLoss()
     print(f"initial TV_weight density: {TV_weight_density} appearance: {TV_weight_app}")
 
-    Eikonal_weight = 0.1
+    Eikonal_weight = 1.0
 
     pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
     for iteration in pbar:
@@ -242,7 +239,6 @@ def reconstruction(args):
                                     compute_extra_metrics=False, device=device)
             summary_writer.add_scalar('test/psnr', np.mean(PSNRs_test), global_step=iteration)
             tensorf.is_eval = False
-
 
 
         if iteration in update_AlphaMask_list:
@@ -321,4 +317,3 @@ if __name__ == '__main__':
         render_test(args)
     else:
         reconstruction(args)
-
