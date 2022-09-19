@@ -433,7 +433,7 @@ class TensorBase(torch.nn.Module):
 
     def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
         batch_size = len(rays_o)
-        N_samples_coarse = 64
+        N_samples_coarse = 128
         up_sample_steps = 4
 
         near, far = self.near_far
@@ -497,7 +497,10 @@ class TensorBase(torch.nn.Module):
         alpha = alpha.transpose(0,2).contiguous()[None,None]
         total_voxels = gridSize[0] * gridSize[1] * gridSize[2]
 
+        alphaMask_a, alphaMask_b = alpha >= 4.0, alpha <= -4.0
         alpha[...] = 1
+        alpha[alphaMask_a] = 0
+        alpha[alphaMask_b] = 0
 
         self.alphaMask = AlphaGridMask(self.device, self.aabb, alpha)
 
