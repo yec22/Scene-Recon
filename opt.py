@@ -59,7 +59,7 @@ def config_parser(cmd=None):
     # volume options
     parser.add_argument("--n_lamb_sigma", type=int, action="append")
     parser.add_argument("--n_lamb_sh", type=int, action="append")
-    parser.add_argument("--data_dim_color", type=int, default=27)
+    parser.add_argument("--data_dim_color", type=int, default=12)
 
     parser.add_argument("--rm_weight_mask_thre", type=float, default=0.0001,
                         help='mask points in ray marching')

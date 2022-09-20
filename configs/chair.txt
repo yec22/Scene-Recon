@@ -4,7 +4,7 @@ datadir = ../data/nerf_synthetic/chair
 expname =  tensorf_chair_VM
 basedir = ./log
 
-n_iters = 100000
+n_iters = 30000
 batch_size = 4096
 
 N_voxel_init = 2097156 # 128**3

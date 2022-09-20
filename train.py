@@ -13,7 +13,7 @@ from dataLoader import dataset_dict
 import sys
 
 
-device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:7" if torch.cuda.is_available() else "cpu")
 renderer = OctreeRender_trilinear_fast
 
 
@@ -168,7 +168,7 @@ def reconstruction(args):
     tvreg = TVLoss()
     print(f"initial TV_weight density: {TV_weight_density} appearance: {TV_weight_app}")
 
-    Eikonal_weight = 1.0
+    Eikonal_weight = 3.0
 
     pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
     for iteration in pbar:

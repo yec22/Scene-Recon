@@ -139,7 +139,6 @@ class MLPDensity(torch.nn.Module):
         layer2 = torch.nn.Linear(featureC, 1)
 
         self.mlp = torch.nn.Sequential(layer1, torch.nn.ReLU(inplace=True), layer2)
-        torch.nn.init.constant_(self.mlp[-1].bias, 0)
     
     def sdf(self, pts, features):
         indata = [pts, features]
@@ -497,7 +496,7 @@ class TensorBase(torch.nn.Module):
         alpha = alpha.transpose(0,2).contiguous()[None,None]
         total_voxels = gridSize[0] * gridSize[1] * gridSize[2]
 
-        alphaMask_a, alphaMask_b = alpha >= 4.0, alpha <= -4.0
+        alphaMask_a, alphaMask_b = alpha >= 5.0, alpha <= -5.0
         alpha[...] = 1
         alpha[alphaMask_a] = 0
         alpha[alphaMask_b] = 0
