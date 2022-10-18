@@ -152,69 +152,16 @@ class MLPDensity(torch.nn.Module):
         return sigma
     
     def gradient(self, x, features):
-        x.requires_grad_(True)
         y = self.sdf(x, features)
         d_output = torch.ones_like(y, requires_grad=False, device=y.device)
         gradients = torch.autograd.grad(
             outputs=y,
             inputs=x,
             grad_outputs=d_output,
-            create_graph=True,
             retain_graph=True,
             only_inputs=True)[0]
-        return gradients.unsqueeze(1)
-
-
-class MLPRender_PE(torch.nn.Module):
-    def __init__(self,inChanel, viewpe=6, pospe=6, featureC=128):
-        super(MLPRender_PE, self).__init__()
-
-        self.in_mlpC = (3+2*viewpe*3)+ (3+2*pospe*3)  + inChanel #
-        self.viewpe = viewpe
-        self.pospe = pospe
-        layer1 = torch.nn.Linear(self.in_mlpC, featureC)
-        layer2 = torch.nn.Linear(featureC, featureC)
-        layer3 = torch.nn.Linear(featureC,3)
-
-        self.mlp = torch.nn.Sequential(layer1, torch.nn.ReLU(inplace=True), layer2, torch.nn.ReLU(inplace=True), layer3)
-        torch.nn.init.constant_(self.mlp[-1].bias, 0)
-
-    def forward(self, pts, viewdirs, features):
-        indata = [features, viewdirs]
-        if self.pospe > 0:
-            indata += [positional_encoding(pts, self.pospe)]
-        if self.viewpe > 0:
-            indata += [positional_encoding(viewdirs, self.viewpe)]
-        mlp_in = torch.cat(indata, dim=-1)
-        rgb = self.mlp(mlp_in)
-        rgb = torch.sigmoid(rgb)
-
-        return rgb
-
-class MLPRender(torch.nn.Module):
-    def __init__(self,inChanel, viewpe=6, featureC=128):
-        super(MLPRender, self).__init__()
-
-        self.in_mlpC = (3+2*viewpe*3) + inChanel
-        self.viewpe = viewpe
         
-        layer1 = torch.nn.Linear(self.in_mlpC, featureC)
-        layer2 = torch.nn.Linear(featureC, featureC)
-        layer3 = torch.nn.Linear(featureC,3)
-
-        self.mlp = torch.nn.Sequential(layer1, torch.nn.ReLU(inplace=True), layer2, torch.nn.ReLU(inplace=True), layer3)
-        torch.nn.init.constant_(self.mlp[-1].bias, 0)
-
-    def forward(self, pts, viewdirs, features):
-        indata = [features, viewdirs]
-        if self.viewpe > 0:
-            indata += [positional_encoding(viewdirs, self.viewpe)]
-        mlp_in = torch.cat(indata, dim=-1)
-        rgb = self.mlp(mlp_in)
-        rgb = torch.sigmoid(rgb)
-
-        return rgb
-
+        return gradients
 
 
 class TensorBase(torch.nn.Module):
@@ -222,10 +169,8 @@ class TensorBase(torch.nn.Module):
                     shadingMode = 'MLP_PE', alphaMask = None, near_far=[2.0,6.0],
                     density_shift = -10, alphaMask_thres=0.001, distance_scale=25, rayMarch_weight_thres=0.0001,
                     pos_pe = 6, view_pe = 6, fea_pe = 6, featureC=128, step_ratio=2.0,
-                    fea2denseAct = 'softplus', density_feat = 4):
+                    fea2denseAct = 'softplus', density_feat = 9):
         super(TensorBase, self).__init__()
-
-        self.is_eval = False
 
         self.density_n_comp = density_n_comp
         self.app_n_comp = appearance_n_comp
@@ -259,15 +204,11 @@ class TensorBase(torch.nn.Module):
 
         self.shadingMode, self.pos_pe, self.view_pe, self.fea_pe, self.featureC = shadingMode, pos_pe, view_pe, fea_pe, featureC
         self.init_render_func(shadingMode, pos_pe, view_pe, fea_pe, featureC, device)
-        self.init_density_func(4, fea_pe, 64, device)
+        self.init_density_func(pos_pe, fea_pe, featureC, device)
 
     def init_render_func(self, shadingMode, pos_pe, view_pe, fea_pe, featureC, device):
-        if shadingMode == 'MLP_PE':
-            self.renderModule = MLPRender_PE(self.app_dim, view_pe, pos_pe, featureC).to(device)
-        elif shadingMode == 'MLP_Fea':
-            self.renderModule = MLPRender_Fea(self.app_dim, view_pe, fea_pe, featureC, self.density_feat).to(device)
-        elif shadingMode == 'MLP':
-            self.renderModule = MLPRender(self.app_dim, view_pe, featureC).to(device)
+        if shadingMode == 'MLP_Fea':
+            self.renderModule = MLPRender_Fea(self.app_dim, view_pe, fea_pe, featureC*2, self.density_feat).to(device)
         elif shadingMode == 'SH':
             self.renderModule = SHRender
         elif shadingMode == 'RGB':
@@ -430,37 +371,47 @@ class TensorBase(torch.nn.Module):
 
         return z_vals, sdf
 
+    @torch.no_grad()
+    def get_near_far(self, rays_o, rays_d):
+        a = torch.sum(rays_d**2, dim=-1, keepdim=True)
+        b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+        mid = 0.5 * (-b) / a
+        near = mid - 1.1
+        far = mid + 1.1
+        return near, far
+
+    @torch.no_grad()
     def sample_ray(self, rays_o, rays_d, is_train=True, N_samples=-1):
         batch_size = len(rays_o)
-        N_samples_coarse = 128
+        N_samples_coarse = N_samples
         up_sample_steps = 4
 
-        near, far = self.near_far
+        near, far = self.get_near_far(rays_o, rays_d)
         interpx = torch.linspace(0.0, 1.0, N_samples_coarse)
         interpx = interpx.expand(batch_size, N_samples_coarse)
-        interpx = near + (far - near) * interpx[:, :]
         interpx = interpx.to(rays_o.device)
+        interpx = near + (far - near) * interpx[:, :]
 
-        with torch.no_grad():
-            pts = rays_o[:, None, :] + rays_d[:, None, :] * interpx[..., :, None]
-            xyz_sampled = self.normalize_coord(pts.reshape(-1, 3))
-            sigma_feature = self.compute_densityfeature(xyz_sampled)
-            sdf = self.densityModule.sdf(xyz_sampled, sigma_feature).squeeze()
-            sdf = sdf.reshape(batch_size, N_samples_coarse)
+        # with torch.no_grad():
+        #     pts = rays_o[:, None, :] + rays_d[:, None, :] * interpx[..., :, None]
+        #     xyz_sampled = self.normalize_coord(pts.reshape(-1, 3))
+        #     sigma_feature = self.compute_densityfeature(xyz_sampled)
+        #     sdf = self.densityModule.sdf(xyz_sampled, sigma_feature).squeeze()
+        #     sdf = sdf.reshape(batch_size, N_samples_coarse)
 
-            for i in range(up_sample_steps):
-                new_z_vals = self.up_sample(rays_o,
-                                            rays_d,
-                                            interpx,
-                                            sdf,
-                                            16,
-                                            64 * 2**i)
-                interpx, sdf = self.cat_z_vals(rays_o,
-                                               rays_d,
-                                               interpx,
-                                               new_z_vals,
-                                               sdf,
-                                               last=(i + 1 == up_sample_steps))
+        #     for i in range(up_sample_steps):
+        #         new_z_vals = self.up_sample(rays_o,
+        #                                     rays_d,
+        #                                     interpx,
+        #                                     sdf,
+        #                                     16,
+        #                                     64 * 2**i)
+        #         interpx, sdf = self.cat_z_vals(rays_o,
+        #                                        rays_d,
+        #                                        interpx,
+        #                                        new_z_vals,
+        #                                        sdf,
+        #                                        last=(i + 1 == up_sample_steps))
 
         rays_pts = rays_o[...,None,:] + rays_d[...,None,:] * interpx[...,None]
 
@@ -496,10 +447,7 @@ class TensorBase(torch.nn.Module):
         alpha = alpha.transpose(0,2).contiguous()[None,None]
         total_voxels = gridSize[0] * gridSize[1] * gridSize[2]
 
-        alphaMask_a, alphaMask_b = alpha >= 5.0, alpha <= -5.0
         alpha[...] = 1
-        alpha[alphaMask_a] = 0
-        alpha[alphaMask_b] = 0
 
         self.alphaMask = AlphaGridMask(self.device, self.aabb, alpha)
 
@@ -595,7 +543,6 @@ class TensorBase(torch.nn.Module):
 
         return sigma
 
-
     def forward(self, rays_chunk, white_bg=True, is_train=False, ndc_ray=False, N_samples=-1):
 
         # sample points
@@ -614,14 +561,21 @@ class TensorBase(torch.nn.Module):
 
         sigma = torch.zeros(xyz_sampled.shape[:-1], device=xyz_sampled.device)
         rgb = torch.zeros((*xyz_sampled.shape[:2], 3), device=xyz_sampled.device)
+        normal_map = torch.zeros(xyz_sampled.shape, device=xyz_sampled.device)
+        geo_feat = torch.zeros((*xyz_sampled.shape[:2], self.density_feat), device=xyz_sampled.device)
 
         
         xyz_sampled_flat = self.normalize_coord(xyz_sampled.reshape(-1, 3))
+        xyz_sampled_flat.requires_grad_(True)
         sigma_feature = self.compute_densityfeature(xyz_sampled_flat)
+        geo_feat = sigma_feature.reshape(geo_feat.shape)
 
         sdf_val = self.densityModule.sdf(xyz_sampled_flat, sigma_feature).squeeze()
-        if not self.is_eval:
-            gradients = self.densityModule.gradient(xyz_sampled_flat, sigma_feature).squeeze()
+        
+        gradients = self.densityModule.gradient(xyz_sampled_flat, sigma_feature)
+        normal = gradients / (torch.norm(gradients, p=2, dim=-1, keepdim=True) + 1e-8)
+        normal_map = normal.reshape(normal_map.shape) # [batch, sample, 3]
+        
         sigma = sdf_val.reshape(sigma.shape)
 
         alpha, weight, bg_weight = self.sdf2alpha(sigma)
@@ -630,8 +584,7 @@ class TensorBase(torch.nn.Module):
 
         if app_mask.any():
             app_features = self.compute_appfeature(xyz_sampled[app_mask])
-            sigma_feature = self.compute_densityfeature(xyz_sampled[app_mask])
-            valid_rgbs = self.renderModule(sigma_feature, viewdirs[app_mask], app_features)
+            valid_rgbs = self.renderModule(geo_feat[app_mask], viewdirs[app_mask], app_features)
             rgb[app_mask] = valid_rgbs
 
         acc_map = torch.sum(weight, -1)
@@ -648,8 +601,9 @@ class TensorBase(torch.nn.Module):
             depth_map = depth_map + (1. - acc_map) * rays_chunk[..., -1]
         
         gradient_error = None
-        if not self.is_eval:
-            gradient_error = torch.mean((torch.linalg.norm(gradients, ord=2, dim=-1) - 1.0) ** 2)
+        gradient_error = torch.mean((torch.linalg.norm(gradients, ord=2, dim=-1) - 1.0) ** 2)
 
-        return rgb_map, depth_map, gradient_error # rgb, sigma, alpha, weight, bg_weight
+        normal_map = torch.sum(weight[..., None] * normal_map, -2)
+
+        return rgb_map, depth_map, gradient_error, normal_map # rgb, sigma, alpha, weight, bg_weight
 

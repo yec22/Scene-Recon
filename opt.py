@@ -32,9 +32,9 @@ def config_parser(cmd=None):
 
     # training options
     # learning rate
-    parser.add_argument("--lr_init", type=float, default=0.02,
+    parser.add_argument("--lr_init", type=float, default=0.01,
                         help='learning rate')    
-    parser.add_argument("--lr_basis", type=float, default=1e-3,
+    parser.add_argument("--lr_basis", type=float, default=5e-4,
                         help='learning rate')
     parser.add_argument("--lr_decay_iters", type=int, default=-1,
                         help = 'number of iterations the lr will decay to the target ratio; -1 will set it to n_iters')
@@ -54,12 +54,14 @@ def config_parser(cmd=None):
                         help='loss weight')
     parser.add_argument("--TV_weight_app", type=float, default=0.0,
                         help='loss weight')
+    parser.add_argument("--Eikonal_weight", type=float, default=0.0,
+                        help='loss weight')
     
     # model
     # volume options
     parser.add_argument("--n_lamb_sigma", type=int, action="append")
     parser.add_argument("--n_lamb_sh", type=int, action="append")
-    parser.add_argument("--data_dim_color", type=int, default=12)
+    parser.add_argument("--data_dim_color", type=int, default=9)
 
     parser.add_argument("--rm_weight_mask_thre", type=float, default=0.0001,
                         help='mask points in ray marching')
@@ -81,7 +83,7 @@ def config_parser(cmd=None):
                         help='number of pe for features')
     parser.add_argument("--featureC", type=int, default=128,
                         help='hidden feature channel in MLP')
-    parser.add_argument("--density_feat", type=int, default=4,
+    parser.add_argument("--density_feat", type=int, default=9,
                         help='feature channel of density')
     
 
@@ -104,7 +106,7 @@ def config_parser(cmd=None):
     parser.add_argument('--ndc_ray', type=int, default=0)
     parser.add_argument('--nSamples', type=int, default=1e6,
                         help='sample point each ray, pass 1e6 if automatic adjust')
-    parser.add_argument('--step_ratio',type=float,default=0.5)
+    parser.add_argument('--step_ratio',type=float,default=1.0)
 
 
     ## blender flags

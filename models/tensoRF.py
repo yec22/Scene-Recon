@@ -42,7 +42,7 @@ class TensorVMSplit(TensorBase):
                 {'params':self.densityModule.parameters(), 'lr':lr_init_network}
             ]
         
-        grad_vars += [{'params':self.deviation_network.parameters(), 'lr':0.5*lr_init_network}]
+        grad_vars += [{'params':self.deviation_network.parameters(), 'lr':lr_init_network}]
         return grad_vars
 
 
@@ -81,9 +81,9 @@ class TensorVMSplit(TensorBase):
     def compute_densityfeature(self, xyz_sampled):
 
         # plane + line basis
-        coordinate_plane = torch.stack((xyz_sampled[..., self.matMode[0]], xyz_sampled[..., self.matMode[1]], xyz_sampled[..., self.matMode[2]])).detach().view(3, -1, 1, 2)
+        coordinate_plane = torch.stack((xyz_sampled[..., self.matMode[0]], xyz_sampled[..., self.matMode[1]], xyz_sampled[..., self.matMode[2]])).view(3, -1, 1, 2)
         coordinate_line = torch.stack((xyz_sampled[..., self.vecMode[0]], xyz_sampled[..., self.vecMode[1]], xyz_sampled[..., self.vecMode[2]]))
-        coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).detach().view(3, -1, 1, 2)
+        coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).view(3, -1, 1, 2)
 
         plane_coef_point,line_coef_point = [],[]
         for idx_plane in range(len(self.density_plane)):
@@ -99,9 +99,9 @@ class TensorVMSplit(TensorBase):
     def compute_appfeature(self, xyz_sampled):
 
         # plane + line basis
-        coordinate_plane = torch.stack((xyz_sampled[..., self.matMode[0]], xyz_sampled[..., self.matMode[1]], xyz_sampled[..., self.matMode[2]])).detach().view(3, -1, 1, 2)
+        coordinate_plane = torch.stack((xyz_sampled[..., self.matMode[0]], xyz_sampled[..., self.matMode[1]], xyz_sampled[..., self.matMode[2]])).view(3, -1, 1, 2)
         coordinate_line = torch.stack((xyz_sampled[..., self.vecMode[0]], xyz_sampled[..., self.vecMode[1]], xyz_sampled[..., self.vecMode[2]]))
-        coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).detach().view(3, -1, 1, 2)
+        coordinate_line = torch.stack((torch.zeros_like(coordinate_line), coordinate_line), dim=-1).view(3, -1, 1, 2)
 
         plane_coef_point,line_coef_point = [],[]
         for idx_plane in range(len(self.app_plane)):
